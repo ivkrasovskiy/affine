@@ -143,3 +143,34 @@ dmypy.json
 cython_debug/
 
 affine/models/
+
+# Training and Experiments
+training/mlruns/
+training/experiments/
+experiments/
+mlruns/
+data/
+*.ckpt
+*.pt
+*.pth
+
+# Training artifacts
+training_venv/
+training/data/
+training/*.json
+training/*.csv
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Thumbnails
+._*
