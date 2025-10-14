@@ -272,22 +272,36 @@ class MLflowCallback(TrainerCallback):
 
 def load_model_simple(model_name: str = MODEL_NAME):
     """Load model - start simple for testing"""
-    
+
     logger.info(f"Loading model: {model_name}")
-    
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
+
+    # Import Qwen3 classes (available in transformers 4.51.0)
+    try:
+        from transformers import Qwen3ForCausalLM
+        logger.info("Using Qwen3ForCausalLM directly")
+    except ImportError:
+        logger.warning("Qwen3ForCausalLM not available, falling back to Qwen2")
+        from transformers import Qwen2ForCausalLM as Qwen3ForCausalLM
+
+    # Use AutoTokenizer for tokenizer (it auto-detects the right class)
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_name,
+        trust_remote_code=True
+    )
+
+    # Load model using Qwen3ForCausalLM
+    model = Qwen3ForCausalLM.from_pretrained(
+        model_name,
+        torch_dtype=torch.float16,
+        device_map="auto",
+        trust_remote_code=True
+    )
+
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-    
-    model = AutoModelForCausalLM.from_pretrained(
-        model_name,
-        torch_dtype=torch.float16,  # Use fp16 for memory efficiency
-        device_map="auto",  # Auto device mapping for large models
-        trust_remote_code=True  # For Marco0/Affine-QQ
-    )
-    
+
     logger.info(f"Model loaded: {model.num_parameters():,} parameters")
-    
+
     return model, tokenizer
 
 def format_instruction(sample: Dict[str, str]) -> Dict[str, str]:
@@ -413,14 +427,17 @@ async def main():
         output_dir = Path(OUT_DIR)
         output_dir.mkdir(parents=True, exist_ok=True)
         
-        # Generate data using validator logic
-        SAT_RATIO = float(os.getenv("SAT_RATIO", "0.75"))
-        logger.info(f"📊 Generating data with validator logic (SAT_RATIO={SAT_RATIO})...")
-        generator = ValidatorDataGenerator(seed=SEED)
-        all_data = await generator.generate_dataset(DATA_SAMPLES, sat_ratio=SAT_RATIO)
-        
+        # Load pre-generated data from file
+        DATA_PATH = os.getenv("DATA_PATH", "../data/training_dataset.json")
+        logger.info(f"📊 Loading pre-generated data from {DATA_PATH}...")
+
+        with open(DATA_PATH, "r") as f:
+            all_data = json.load(f)
+
+        logger.info(f"Loaded {len(all_data)} samples")
+
         if len(all_data) < 10:
-            raise RuntimeError("Failed to generate sufficient training data")
+            raise RuntimeError("Insufficient training data in dataset")
         
         # Split dataset
         train_data, val_data, test_data = split_dataset(all_data)
@@ -442,7 +459,19 @@ async def main():
         # Load model
         logger.info("🤖 Loading model...")
         model, tokenizer = load_model_simple(MODEL_NAME)
-        
+
+        # BASELINE EVALUATION on test set before training
+        logger.info("📊 Evaluating BASELINE model on test set...")
+        callback = ValidatorMetricsCallback(test_data, tokenizer)
+        baseline_sat = callback._evaluate_sat_with_validator(model)
+        baseline_elr = callback._evaluate_elr_with_validator(model)
+        baseline_overall = (baseline_sat + baseline_elr) / 2 if baseline_elr > 0 else baseline_sat
+
+        logger.info(f"BASELINE - SAT: {baseline_sat:.3f}, ELR: {baseline_elr:.3f}, Overall: {baseline_overall:.3f}")
+        mlflow.log_metric("baseline_sat_accuracy", baseline_sat)
+        mlflow.log_metric("baseline_elr_accuracy", baseline_elr)
+        mlflow.log_metric("baseline_overall_accuracy", baseline_overall)
+
         # Create datasets
         logger.info("🔨 Creating tokenized datasets...")
         train_dataset = create_dataset(train_data, tokenizer)
@@ -503,10 +532,38 @@ async def main():
         logger.info("💾 Saving model...")
         trainer.save_model()
         tokenizer.save_pretrained(training_args.output_dir)
-        
+
+        # FINAL EVALUATION on test set after training
+        logger.info("📊 Evaluating FINE-TUNED model on test set...")
+        final_sat = callback._evaluate_sat_with_validator(model)
+        final_elr = callback._evaluate_elr_with_validator(model)
+        final_overall = (final_sat + final_elr) / 2 if final_elr > 0 else final_sat
+
+        logger.info(f"FINE-TUNED - SAT: {final_sat:.3f}, ELR: {final_elr:.3f}, Overall: {final_overall:.3f}")
+        mlflow.log_metric("final_sat_accuracy", final_sat)
+        mlflow.log_metric("final_elr_accuracy", final_elr)
+        mlflow.log_metric("final_overall_accuracy", final_overall)
+
+        # Calculate improvements
+        sat_improvement = final_sat - baseline_sat
+        elr_improvement = final_elr - baseline_elr
+        overall_improvement = final_overall - baseline_overall
+
+        logger.info("=" * 50)
+        logger.info("📈 TRAINING RESULTS COMPARISON")
+        logger.info("=" * 50)
+        logger.info(f"SAT:     {baseline_sat:.3f} -> {final_sat:.3f} (Δ {sat_improvement:+.3f})")
+        logger.info(f"ELR:     {baseline_elr:.3f} -> {final_elr:.3f} (Δ {elr_improvement:+.3f})")
+        logger.info(f"Overall: {baseline_overall:.3f} -> {final_overall:.3f} (Δ {overall_improvement:+.3f})")
+        logger.info("=" * 50)
+
+        mlflow.log_metric("sat_improvement", sat_improvement)
+        mlflow.log_metric("elr_improvement", elr_improvement)
+        mlflow.log_metric("overall_improvement", overall_improvement)
+
         # Log artifacts
         mlflow.log_artifacts(str(output_dir))
-        
+
         logger.info("✅ Training completed successfully!")
         
     except Exception as e:
