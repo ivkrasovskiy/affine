@@ -501,7 +501,7 @@ async def main():
             eval_steps=EVAL_STEPS,
             save_steps=SAVE_STEPS,
             save_total_limit=2,
-            fp16=True,  # Use fp16 for memory efficiency
+            bf16=USE_BF16,  # Use bf16 (model is in bfloat16)
             gradient_checkpointing=True,
             optim="adamw_torch",
             max_grad_norm=1.0,
