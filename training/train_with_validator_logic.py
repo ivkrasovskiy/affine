@@ -275,23 +275,19 @@ def load_model_simple(model_name: str = MODEL_NAME):
 
     logger.info(f"Loading model with 4-bit quantization: {model_name}")
 
-    # Import Qwen3 classes (available in transformers 4.51.0)
+    # Import Qwen3 classes (available in transformers 4.51.3+)
     try:
-        from transformers import Qwen3ForCausalLM, Qwen3Tokenizer
-        logger.info("Using Qwen3ForCausalLM and Qwen3Tokenizer directly")
-        # Use Qwen3Tokenizer directly to avoid AutoConfig issues
-        tokenizer = Qwen3Tokenizer.from_pretrained(
-            model_name,
-            trust_remote_code=True
-        )
+        from transformers import Qwen3ForCausalLM
+        logger.info("Using Qwen3ForCausalLM directly")
     except ImportError:
-        logger.warning("Qwen3 classes not available, falling back to Qwen2")
+        logger.warning("Qwen3ForCausalLM not available, falling back to Qwen2")
         from transformers import Qwen2ForCausalLM as Qwen3ForCausalLM
-        from transformers import Qwen2Tokenizer
-        tokenizer = Qwen2Tokenizer.from_pretrained(
-            model_name,
-            trust_remote_code=True
-        )
+
+    # Use AutoTokenizer for tokenizer (it auto-detects the right class)
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_name,
+        trust_remote_code=True
+    )
 
     # 4-bit quantization config for QLoRA
     bnb_config = BitsAndBytesConfig(
