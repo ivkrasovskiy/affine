@@ -6,7 +6,7 @@ cd "$(dirname "$0")"
 source ../.venv/bin/activate
 
 export TOTAL_SAMPLES=65536
-export SAT_RATIO=0.75
+export SAT_RATIO=1.0
 export SEED=42
 export OUTPUT_DIR="../data"
 export HF_HUB_ENABLE_HF_TRANSFER=0
