@@ -271,9 +271,9 @@ class MLflowCallback(TrainerCallback):
 # ============== TRAINING FUNCTIONS ==============
 
 def load_model_simple(model_name: str = MODEL_NAME):
-    """Load model - start simple for testing"""
+    """Load model with 4-bit quantization for memory efficiency"""
 
-    logger.info(f"Loading model: {model_name}")
+    logger.info(f"Loading model with 4-bit quantization: {model_name}")
 
     # Import Qwen3 classes (available in transformers 4.51.0)
     try:
@@ -289,18 +289,42 @@ def load_model_simple(model_name: str = MODEL_NAME):
         trust_remote_code=True
     )
 
-    # Load model using Qwen3ForCausalLM
+    # 4-bit quantization config for QLoRA
+    bnb_config = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_compute_dtype=torch.bfloat16 if USE_BF16 else torch.float16,
+        bnb_4bit_use_double_quant=True,
+    )
+
+    # Load model using Qwen3ForCausalLM with 4-bit quantization
     model = Qwen3ForCausalLM.from_pretrained(
         model_name,
-        torch_dtype=torch.float16,
+        quantization_config=bnb_config,
         device_map="auto",
         trust_remote_code=True
     )
 
+    # Prepare model for k-bit training
+    model = prepare_model_for_kbit_training(model)
+
+    # Add LoRA adapters
+    lora_config = LoraConfig(
+        r=LORA_R,
+        lora_alpha=LORA_ALPHA,
+        target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+        lora_dropout=LORA_DROPOUT,
+        bias="none",
+        task_type=TaskType.CAUSAL_LM
+    )
+
+    model = get_peft_model(model, lora_config)
+    model.print_trainable_parameters()
+
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    logger.info(f"Model loaded: {model.num_parameters():,} parameters")
+    logger.info(f"Model loaded with LoRA adapters")
 
     return model, tokenizer
 
