@@ -277,17 +277,21 @@ def load_model_simple(model_name: str = MODEL_NAME):
 
     # Import Qwen3 classes (available in transformers 4.51.0)
     try:
-        from transformers import Qwen3ForCausalLM
-        logger.info("Using Qwen3ForCausalLM directly")
+        from transformers import Qwen3ForCausalLM, Qwen3Tokenizer
+        logger.info("Using Qwen3ForCausalLM and Qwen3Tokenizer directly")
+        # Use Qwen3Tokenizer directly to avoid AutoConfig issues
+        tokenizer = Qwen3Tokenizer.from_pretrained(
+            model_name,
+            trust_remote_code=True
+        )
     except ImportError:
-        logger.warning("Qwen3ForCausalLM not available, falling back to Qwen2")
+        logger.warning("Qwen3 classes not available, falling back to Qwen2")
         from transformers import Qwen2ForCausalLM as Qwen3ForCausalLM
-
-    # Use AutoTokenizer for tokenizer (it auto-detects the right class)
-    tokenizer = AutoTokenizer.from_pretrained(
-        model_name,
-        trust_remote_code=True
-    )
+        from transformers import Qwen2Tokenizer
+        tokenizer = Qwen2Tokenizer.from_pretrained(
+            model_name,
+            trust_remote_code=True
+        )
 
     # 4-bit quantization config for QLoRA
     bnb_config = BitsAndBytesConfig(
@@ -452,7 +456,8 @@ async def main():
         output_dir.mkdir(parents=True, exist_ok=True)
         
         # Load pre-generated data from file
-        DATA_PATH = os.getenv("DATA_PATH", "../data/training_dataset.json")
+        # IMPORTANT: Use validator_dataset.json which contains full metadata including validator_solution
+        DATA_PATH = os.getenv("DATA_PATH", "../data/validator_dataset.json")
         logger.info(f"📊 Loading pre-generated data from {DATA_PATH}...")
 
         with open(DATA_PATH, "r") as f:
