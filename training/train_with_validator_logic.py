@@ -131,13 +131,40 @@ class ValidatorMetricsCallback(TrainerCallback):
         self.elr_samples = [s for s in eval_samples if s.get("environment") == "ELR"]
         
         logger.info(f"Evaluation callback: {len(self.sat_samples)} SAT, {len(self.elr_samples)} ELR")
-    
+
+    def on_train_begin(self, args, state, control, model=None, **kwargs):
+        """Run initial baseline evaluation before training starts"""
+        logger.info("🔍 Running baseline evaluation on untrained model...")
+
+        model.eval()
+
+        try:
+            # Evaluate using validator logic
+            sat_accuracy = self._evaluate_sat_with_validator(model)
+            elr_accuracy = self._evaluate_elr_with_validator(model)
+            overall_accuracy = (sat_accuracy + elr_accuracy) / 2
+
+            # Log to MLflow with step 0
+            mlflow.log_metric("validator_sat_accuracy", sat_accuracy, step=0)
+            mlflow.log_metric("validator_elr_accuracy", elr_accuracy, step=0)
+            mlflow.log_metric("validator_overall_accuracy", overall_accuracy, step=0)
+
+            logger.info(f"📊 Baseline metrics - SAT={sat_accuracy:.3f}, ELR={elr_accuracy:.3f}, Overall={overall_accuracy:.3f}")
+
+        except Exception as e:
+            logger.error(f"Baseline evaluation failed: {e}")
+        finally:
+            model.train()
+
+        return control
+
     def on_step_end(self, args, state, control, model=None, **kwargs):
         """Run validator-based evaluation"""
-        
-        if state.global_step == 0 or state.global_step % self.eval_every != 0:
+
+        # Skip if not at evaluation step (but always run at step 0 for baseline)
+        if state.global_step != 0 and state.global_step % self.eval_every != 0:
             return control
-            
+
         logger.info(f"🔍 Validator evaluation at step {state.global_step}")
         
         model.eval()
