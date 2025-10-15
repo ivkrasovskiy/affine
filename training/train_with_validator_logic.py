@@ -139,12 +139,13 @@ class ValidatorMetricsCallback(TrainerCallback):
 
         try:
             # Evaluate using validator logic (SAT only)
-            sat_accuracy = self._evaluate_sat_with_validator(model)
+            sat_accuracy, format_accuracy = self._evaluate_sat_with_validator(model)
 
             # Log to MLflow with step 0
             mlflow.log_metric("validator_sat_accuracy", sat_accuracy, step=0)
+            mlflow.log_metric("validator_format_accuracy", format_accuracy, step=0)
 
-            logger.info(f"📊 Baseline SAT accuracy: {sat_accuracy:.3f}")
+            logger.info(f"📊 Baseline - Format: {format_accuracy:.1%}, Solve: {sat_accuracy:.1%}")
 
         except Exception as e:
             logger.error(f"Baseline evaluation failed: {e}")
@@ -166,40 +167,46 @@ class ValidatorMetricsCallback(TrainerCallback):
 
         try:
             # Evaluate using validator logic (SAT only)
-            sat_accuracy = self._evaluate_sat_with_validator(model)
+            sat_accuracy, format_accuracy = self._evaluate_sat_with_validator(model)
 
             # Log to MLflow
             step = int(state.global_step)
             mlflow.log_metric("validator_sat_accuracy", sat_accuracy, step=step)
+            mlflow.log_metric("validator_format_accuracy", format_accuracy, step=step)
 
-            logger.info(f"Step {step}: SAT accuracy = {sat_accuracy:.3f}")
-            
+            logger.info(f"Step {step}: Format {format_accuracy:.1%}, Solve {sat_accuracy:.1%}")
+
         except Exception as e:
             logger.error(f"Evaluation failed: {e}")
         finally:
             model.train()
-            
+
         return control
     
-    def _evaluate_sat_with_validator(self, model) -> float:
-        """Evaluate SAT using exact validator validation logic"""
+    def _evaluate_sat_with_validator(self, model) -> tuple[float, float]:
+        """Evaluate SAT using exact validator validation logic
+
+        Returns:
+            (solve_accuracy, format_accuracy): both as floats 0.0-1.0
+        """
         if not self.sat_samples:
-            return 0.0
-            
+            return 0.0, 0.0
+
         correct = 0
+        valid_format = 0
         total = min(EVAL_SAMPLES // 2, len(self.sat_samples))
-        
+
         amp_ctx = torch.autocast("cuda", dtype=torch.bfloat16) if USE_BF16 and torch.cuda.is_available() else nullcontext()
-        
+
         for i in range(total):
             sample = self.sat_samples[i]
             prompt = f"### Instruction:\n{sample['prompt']}\n\n### Response:\n"
-            
+
             try:
                 inputs = self.tokenizer(prompt, return_tensors="pt", truncation=True, max_length=1024)
                 if torch.cuda.is_available():
                     inputs = {k: v.cuda() for k, v in inputs.items()}
-                
+
                 with torch.inference_mode(), amp_ctx:
                     outputs = model.generate(
                         **inputs,
@@ -208,7 +215,7 @@ class ValidatorMetricsCallback(TrainerCallback):
                         do_sample=GEN_DO_SAMPLE,
                         pad_token_id=self.tokenizer.eos_token_id
                     )
-                
+
                 response = self.tokenizer.decode(
                     outputs[0][inputs['input_ids'].shape[1]:],
                     skip_special_tokens=True
@@ -218,23 +225,34 @@ class ValidatorMetricsCallback(TrainerCallback):
                 if i < 3:
                     logger.info(f"Sample {i} response: {response[:200]}")
 
+                # Check format validity (can we parse variables?)
+                import re
+                matches = re.findall(r"x(\d+)=(True|False|1|0)", response)
+                n_vars_expected = sample['n_vars']
+                has_valid_format = len(matches) >= n_vars_expected * 0.8  # At least 80% of vars
+
+                if has_valid_format:
+                    valid_format += 1
+
                 # Use validator's exact validation logic
                 is_correct = self.generator.validate_sat_response(sample, response, debug=(i < 3))
-                if i < 3 and not is_correct:
-                    logger.info(f"Sample {i} FAILED validation")
+                if i < 3:
+                    logger.info(f"Sample {i}: format={'✓' if has_valid_format else '✗'}, correct={'✓' if is_correct else '✗'}")
 
                 if is_correct:
                     correct += 1
-                
+
                 # Memory management (from colleague's code)
                 del inputs, outputs
                 if i % 4 == 0:
                     torch.cuda.empty_cache()
-                    
+
             except Exception as e:
                 logger.error(f"Error evaluating SAT sample {i}: {e}")
-        
-        return correct / max(total, 1)
+
+        solve_accuracy = correct / max(total, 1)
+        format_accuracy = valid_format / max(total, 1)
+        return solve_accuracy, format_accuracy
     
 # ============== MLFLOW LOGGING CALLBACK ==============
 
@@ -467,10 +485,11 @@ async def main():
         # BASELINE EVALUATION on test set before training (SAT only)
         logger.info("📊 Evaluating BASELINE model on test set...")
         callback = ValidatorMetricsCallback(test_data, tokenizer)
-        baseline_sat = callback._evaluate_sat_with_validator(model)
+        baseline_sat, baseline_format = callback._evaluate_sat_with_validator(model)
 
-        logger.info(f"BASELINE - SAT accuracy: {baseline_sat:.3f}")
+        logger.info(f"BASELINE - Format: {baseline_format:.1%}, Solve: {baseline_sat:.1%}")
         mlflow.log_metric("baseline_sat_accuracy", baseline_sat)
+        mlflow.log_metric("baseline_format_accuracy", baseline_format)
 
         # Create datasets
         logger.info("🔨 Creating tokenized datasets...")
@@ -535,21 +554,25 @@ async def main():
 
         # FINAL EVALUATION on test set after training
         logger.info("📊 Evaluating FINE-TUNED model on test set...")
-        final_sat = callback._evaluate_sat_with_validator(model)
+        final_sat, final_format = callback._evaluate_sat_with_validator(model)
 
-        logger.info(f"FINE-TUNED - SAT accuracy: {final_sat:.3f}")
+        logger.info(f"FINE-TUNED - Format: {final_format:.1%}, Solve: {final_sat:.1%}")
         mlflow.log_metric("final_sat_accuracy", final_sat)
+        mlflow.log_metric("final_format_accuracy", final_format)
 
-        # Calculate improvement
+        # Calculate improvements
         sat_improvement = final_sat - baseline_sat
+        format_improvement = final_format - baseline_format
 
         logger.info("=" * 50)
         logger.info("📈 TRAINING RESULTS COMPARISON")
         logger.info("=" * 50)
-        logger.info(f"SAT: {baseline_sat:.3f} -> {final_sat:.3f} (Δ {sat_improvement:+.3f})")
+        logger.info(f"Format:  {baseline_format:.1%} -> {final_format:.1%} (Δ {format_improvement:+.1%})")
+        logger.info(f"Solve:   {baseline_sat:.1%} -> {final_sat:.1%} (Δ {sat_improvement:+.1%})")
         logger.info("=" * 50)
 
         mlflow.log_metric("sat_improvement", sat_improvement)
+        mlflow.log_metric("format_improvement", format_improvement)
 
         # Log artifacts
         mlflow.log_artifacts(str(output_dir))

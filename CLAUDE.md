@@ -98,3 +98,46 @@ qs files get <id> <remote> <local>        # Download file from sandbox
 - Redis caching for blockchain data
 - Supports both local development and containerized deployment
 - Environment templates stored in `affine/quixand/env_templates/`
+
+## Training
+
+### SAT Solver Fine-tuning
+
+**Complete guide:** See `training/SAT_TRAINING_GUIDE.md` for detailed instructions on fine-tuning models for SAT problem solving.
+
+**Quick start:**
+```bash
+cd training
+source ../.venv/bin/activate
+
+# IMPORTANT: Install adapters first, then downgrade transformers
+source $HOME/.local/bin/env uv
+uv pip install adapters
+uv pip install transformers==4.51.0
+
+# Generate dataset (k=3 SAT problems with size variation)
+export TOTAL_SAMPLES=8192
+export SAT_RATIO=1.0
+export VARY_SIZE=true
+bash generate_large_dataset.sh
+
+# Train
+export HF_HUB_ENABLE_HF_TRANSFER=0
+export DATA_PATH="../data/validator_dataset.json"
+nohup python train_with_validator_logic.py > training.log 2>&1 &
+
+# Monitor
+tail -f training.log
+mlflow ui --backend-store-uri file:///workspace/affine/training/mlruns --port 5000
+```
+
+**Key insights:**
+- Use k=3 (not k=10) for proper SAT difficulty
+- Vary problem sizes (n ∈ [10,30]) to prevent overfitting
+- Track both format_accuracy and solve_accuracy metrics
+- RTX 5090 (32GB) recommended for production results (allows r=128 LoRA, 7% params)
+- A5000 (24GB) marginal but works for experimentation (r=32 LoRA, 1.6% params)
+
+**Expected performance:**
+- Current setup (1K samples, r=32): 10-20% accuracy
+- Recommended (10K samples, r=128, +embeddings/lm_head): 60-80% accuracy
