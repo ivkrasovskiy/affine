@@ -126,11 +126,10 @@ class ValidatorMetricsCallback(TrainerCallback):
         # Create generator for validation
         self.generator = ValidatorDataGenerator(seed=SEED)
         
-        # Prepare evaluation samples
+        # Prepare evaluation samples (SAT only)
         self.sat_samples = [s for s in eval_samples if s.get("environment") == "SAT"]
-        self.elr_samples = [s for s in eval_samples if s.get("environment") == "ELR"]
-        
-        logger.info(f"Evaluation callback: {len(self.sat_samples)} SAT, {len(self.elr_samples)} ELR")
+
+        logger.info(f"Evaluation callback: {len(self.sat_samples)} SAT samples")
 
     def on_train_begin(self, args, state, control, model=None, **kwargs):
         """Run initial baseline evaluation before training starts"""
@@ -139,17 +138,13 @@ class ValidatorMetricsCallback(TrainerCallback):
         model.eval()
 
         try:
-            # Evaluate using validator logic
+            # Evaluate using validator logic (SAT only)
             sat_accuracy = self._evaluate_sat_with_validator(model)
-            elr_accuracy = self._evaluate_elr_with_validator(model)
-            overall_accuracy = (sat_accuracy + elr_accuracy) / 2
 
             # Log to MLflow with step 0
             mlflow.log_metric("validator_sat_accuracy", sat_accuracy, step=0)
-            mlflow.log_metric("validator_elr_accuracy", elr_accuracy, step=0)
-            mlflow.log_metric("validator_overall_accuracy", overall_accuracy, step=0)
 
-            logger.info(f"📊 Baseline metrics - SAT={sat_accuracy:.3f}, ELR={elr_accuracy:.3f}, Overall={overall_accuracy:.3f}")
+            logger.info(f"📊 Baseline SAT accuracy: {sat_accuracy:.3f}")
 
         except Exception as e:
             logger.error(f"Baseline evaluation failed: {e}")
@@ -166,22 +161,18 @@ class ValidatorMetricsCallback(TrainerCallback):
             return control
 
         logger.info(f"🔍 Validator evaluation at step {state.global_step}")
-        
+
         model.eval()
-        
+
         try:
-            # Evaluate using validator logic
+            # Evaluate using validator logic (SAT only)
             sat_accuracy = self._evaluate_sat_with_validator(model)
-            elr_accuracy = self._evaluate_elr_with_validator(model)
-            overall_accuracy = (sat_accuracy + elr_accuracy) / 2
-            
+
             # Log to MLflow
             step = int(state.global_step)
             mlflow.log_metric("validator_sat_accuracy", sat_accuracy, step=step)
-            mlflow.log_metric("validator_elr_accuracy", elr_accuracy, step=step)
-            mlflow.log_metric("validator_overall_accuracy", overall_accuracy, step=step)
-            
-            logger.info(f"Step {step}: SAT={sat_accuracy:.3f}, ELR={elr_accuracy:.3f}, Overall={overall_accuracy:.3f}")
+
+            logger.info(f"Step {step}: SAT accuracy = {sat_accuracy:.3f}")
             
         except Exception as e:
             logger.error(f"Evaluation failed: {e}")
@@ -219,12 +210,20 @@ class ValidatorMetricsCallback(TrainerCallback):
                     )
                 
                 response = self.tokenizer.decode(
-                    outputs[0][inputs['input_ids'].shape[1]:], 
+                    outputs[0][inputs['input_ids'].shape[1]:],
                     skip_special_tokens=True
                 ).strip()
-                
+
+                # Debug: Log first few responses to see format
+                if i < 3:
+                    logger.info(f"Sample {i} response: {response[:200]}")
+
                 # Use validator's exact validation logic
-                if self.generator.validate_sat_response(sample, response):
+                is_correct = self.generator.validate_sat_response(sample, response, debug=(i < 3))
+                if i < 3 and not is_correct:
+                    logger.info(f"Sample {i} FAILED validation")
+
+                if is_correct:
                     correct += 1
                 
                 # Memory management (from colleague's code)
@@ -237,53 +236,6 @@ class ValidatorMetricsCallback(TrainerCallback):
         
         return correct / max(total, 1)
     
-    def _evaluate_elr_with_validator(self, model) -> float:
-        """Evaluate ELR using exact validator validation logic"""
-        if not self.elr_samples:
-            return 0.0
-            
-        correct = 0
-        total = min(EVAL_SAMPLES // 2, len(self.elr_samples))
-        
-        amp_ctx = torch.autocast("cuda", dtype=torch.bfloat16) if USE_BF16 and torch.cuda.is_available() else nullcontext()
-        
-        for i in range(total):
-            sample = self.elr_samples[i]
-            prompt = f"### Instruction:\n{sample['prompt']}\n\n### Response:\n"
-            
-            try:
-                inputs = self.tokenizer(prompt, return_tensors="pt", truncation=True, max_length=1024)
-                if torch.cuda.is_available():
-                    inputs = {k: v.cuda() for k, v in inputs.items()}
-                
-                with torch.inference_mode(), amp_ctx:
-                    outputs = model.generate(
-                        **inputs,
-                        max_new_tokens=GEN_MAX_NEW,
-                        temperature=GEN_TEMP,
-                        do_sample=GEN_DO_SAMPLE,
-                        pad_token_id=self.tokenizer.eos_token_id
-                    )
-                
-                response = self.tokenizer.decode(
-                    outputs[0][inputs['input_ids'].shape[1]:], 
-                    skip_special_tokens=True
-                ).strip()
-                
-                # Use validator's exact validation logic
-                if self.generator.validate_elr_response(sample, response):
-                    correct += 1
-                
-                # Memory management
-                del inputs, outputs
-                if i % 4 == 0:
-                    torch.cuda.empty_cache()
-                    
-            except Exception as e:
-                logger.error(f"Error evaluating ELR sample {i}: {e}")
-        
-        return correct / max(total, 1)
-
 # ============== MLFLOW LOGGING CALLBACK ==============
 
 class MLflowCallback(TrainerCallback):
@@ -512,17 +464,13 @@ async def main():
         logger.info("🤖 Loading model...")
         model, tokenizer = load_model_simple(MODEL_NAME)
 
-        # BASELINE EVALUATION on test set before training
+        # BASELINE EVALUATION on test set before training (SAT only)
         logger.info("📊 Evaluating BASELINE model on test set...")
         callback = ValidatorMetricsCallback(test_data, tokenizer)
         baseline_sat = callback._evaluate_sat_with_validator(model)
-        baseline_elr = callback._evaluate_elr_with_validator(model)
-        baseline_overall = (baseline_sat + baseline_elr) / 2 if baseline_elr > 0 else baseline_sat
 
-        logger.info(f"BASELINE - SAT: {baseline_sat:.3f}, ELR: {baseline_elr:.3f}, Overall: {baseline_overall:.3f}")
+        logger.info(f"BASELINE - SAT accuracy: {baseline_sat:.3f}")
         mlflow.log_metric("baseline_sat_accuracy", baseline_sat)
-        mlflow.log_metric("baseline_elr_accuracy", baseline_elr)
-        mlflow.log_metric("baseline_overall_accuracy", baseline_overall)
 
         # Create datasets
         logger.info("🔨 Creating tokenized datasets...")
@@ -588,30 +536,20 @@ async def main():
         # FINAL EVALUATION on test set after training
         logger.info("📊 Evaluating FINE-TUNED model on test set...")
         final_sat = callback._evaluate_sat_with_validator(model)
-        final_elr = callback._evaluate_elr_with_validator(model)
-        final_overall = (final_sat + final_elr) / 2 if final_elr > 0 else final_sat
 
-        logger.info(f"FINE-TUNED - SAT: {final_sat:.3f}, ELR: {final_elr:.3f}, Overall: {final_overall:.3f}")
+        logger.info(f"FINE-TUNED - SAT accuracy: {final_sat:.3f}")
         mlflow.log_metric("final_sat_accuracy", final_sat)
-        mlflow.log_metric("final_elr_accuracy", final_elr)
-        mlflow.log_metric("final_overall_accuracy", final_overall)
 
-        # Calculate improvements
+        # Calculate improvement
         sat_improvement = final_sat - baseline_sat
-        elr_improvement = final_elr - baseline_elr
-        overall_improvement = final_overall - baseline_overall
 
         logger.info("=" * 50)
         logger.info("📈 TRAINING RESULTS COMPARISON")
         logger.info("=" * 50)
-        logger.info(f"SAT:     {baseline_sat:.3f} -> {final_sat:.3f} (Δ {sat_improvement:+.3f})")
-        logger.info(f"ELR:     {baseline_elr:.3f} -> {final_elr:.3f} (Δ {elr_improvement:+.3f})")
-        logger.info(f"Overall: {baseline_overall:.3f} -> {final_overall:.3f} (Δ {overall_improvement:+.3f})")
+        logger.info(f"SAT: {baseline_sat:.3f} -> {final_sat:.3f} (Δ {sat_improvement:+.3f})")
         logger.info("=" * 50)
 
         mlflow.log_metric("sat_improvement", sat_improvement)
-        mlflow.log_metric("elr_improvement", elr_improvement)
-        mlflow.log_metric("overall_improvement", overall_improvement)
 
         # Log artifacts
         mlflow.log_artifacts(str(output_dir))

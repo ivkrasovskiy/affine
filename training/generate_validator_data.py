@@ -21,45 +21,61 @@ logger = logging.getLogger(__name__)
 class ValidatorDataGenerator:
     """Generate training data using exact validator logic"""
     
-    def __init__(self, seed: int = 42):
+    def __init__(self, seed: int = 42, vary_size: bool = True):
         self.seed = seed
+        self.vary_size = vary_size
         random.seed(seed)
-        
+
         # Import the actual environment classes
         from affine.envs.sat import SAT
         from affine.envs.elr import ELR
-        
-        # Initialize environments with SAME parameters as validators
-        self.sat_env = SAT(n=15, k=10, m=None)  # Default validator params
+
+        # Initialize environments with PROPER difficulty parameters
+        # Using k=3 (3-SAT) for meaningful constraints instead of k=10 (99.9% trivial)
+        # If vary_size=True, we'll create new environments with random n for each sample
+        self.default_n = 15
+        self.n_range = (10, 30) if vary_size else (15, 15)
+        self.k = 3  # Fixed at 3-SAT for proper difficulty
+
+        self.sat_env = SAT(n=self.default_n, k=self.k, m=None)
         self.elr_env = ELR()
-        
-        logger.info(f"Initialized SAT env: n={self.sat_env.n}, k={self.sat_env.k}, m={self.sat_env.m}")
+
+        logger.info(f"Initialized SAT generator: k={self.k}, n_range={self.n_range}, vary_size={vary_size}")
     
     async def generate_sat_sample(self) -> Optional[Dict[str, Any]]:
-        """Generate SAT sample using EXACT validator logic"""
+        """Generate SAT sample using EXACT validator logic with optional size variation"""
         try:
+            from affine.envs.sat import SAT
+
+            # Vary problem size if enabled
+            if self.vary_size:
+                n = random.randint(self.n_range[0], self.n_range[1])
+                sat_env = SAT(n=n, k=self.k, m=None)
+            else:
+                sat_env = self.sat_env
+
             # Use the validator's generate method directly
-            challenge = await self.sat_env.generate()
-            
+            challenge = await sat_env.generate()
+
             # Extract the known solution from validator
             solution = challenge.extra["sol"]
             clauses = challenge.extra["cls"]
-            
+
             # Create ground truth in the EXACT format validators expect
-            ground_truth = ", ".join([f"x{k}={'True' if v else 'False'}" 
+            ground_truth = ", ".join([f"x{k}={'True' if v else 'False'}"
                                     for k, v in sorted(solution.items())])
-            
+
             return {
                 "prompt": challenge.prompt,
                 "completion": ground_truth,
                 "environment": "SAT",
                 "validator_solution": solution,
                 "validator_clauses": clauses,
-                "n_vars": self.sat_env.n,
-                "k_vars_per_clause": self.sat_env.k,
-                "n_clauses": self.sat_env.m
+                "n_vars": sat_env.n,
+                "k_vars_per_clause": sat_env.k,
+                "n_clauses": sat_env.m
             }
-            
+
         except Exception as e:
             logger.error(f"Error generating SAT sample: {e}")
             return None
@@ -90,24 +106,33 @@ class ValidatorDataGenerator:
             logger.error(f"Error generating ELR sample: {e}")
             return None
     
-    def validate_sat_response(self, challenge_data: Dict, response: str) -> bool:
+    def validate_sat_response(self, challenge_data: Dict, response: str, debug: bool = False) -> bool:
         """Validate SAT response using EXACT validator evaluation logic"""
         try:
             # Recreate the validation logic from sat.py line 30-34
             import re
-            
+
             solution = challenge_data["validator_solution"]
             clauses = challenge_data["validator_clauses"]
-            
+
             # Parse response exactly like validator does
+            matches = re.findall(r"x(\d+)=(True|False|1|0)", response)
             got = {int(v): val.lower() in ("true","1")
-                   for v, val in re.findall(r"x(\d+)=(True|False|1|0)", response)}
-            
+                   for v, val in matches}
+
+            if debug:
+                logger.info(f"Parsed {len(got)} variables from response (expected {len(solution)})")
+                logger.info(f"First 5 parsed: {dict(list(got.items())[:5])}")
+                logger.info(f"Expected solution (first 5): {dict(list(solution.items())[:5])}")
+
             # Check if assignment satisfies all clauses (validator logic)
             ok = all(any((lit>0)==got.get(abs(lit), None) for lit in c) for c in clauses)
-            
+
+            if debug:
+                logger.info(f"Validation result: {ok}")
+
             return ok
-            
+
         except Exception as e:
             logger.error(f"Error validating SAT response: {e}")
             return False
@@ -138,7 +163,7 @@ class ValidatorDataGenerator:
         sat_target = int(total_samples * sat_ratio)
         elr_target = total_samples - sat_target
         
-        logger.info(f"Generating {total_samples} samples (SAT: {sat_target}, ELR: {elr_target})")
+        logger.info(f"Generating {total_samples} samples (SAT: {sat_target})")
         
         samples = []
         
@@ -159,27 +184,6 @@ class ValidatorDataGenerator:
                     logger.warning("Generated SAT sample failed validation")
         
         sat_progress.close()
-        
-        # Generate ELR samples only if needed
-        if elr_target > 0:
-            logger.info("Generating ELR samples...")
-            elr_progress = tqdm(total=elr_target, desc="ELR")
-            elr_count = 0
-            
-            while elr_count < elr_target:
-                sample = await self.generate_elr_sample()
-                if sample:
-                    # Validate the sample works
-                    if self.validate_elr_response(sample, sample["completion"]):
-                        samples.append(sample)
-                        elr_count += 1
-                        elr_progress.update(1)
-                    else:
-                        logger.warning("Generated ELR sample failed validation")
-            
-            elr_progress.close()
-        else:
-            logger.info("Skipping ELR samples (SAT_RATIO=1.0)")
         
         # Shuffle to mix environments
         random.shuffle(samples)
@@ -239,16 +243,18 @@ async def main():
     SAT_RATIO = float(os.getenv("SAT_RATIO", "0.75"))
     SEED = int(os.getenv("SEED", "42"))
     OUTPUT_DIR = os.getenv("OUTPUT_DIR", "./data")
-    
+    VARY_SIZE = os.getenv("VARY_SIZE", "true").lower() in ("true", "1", "yes")
+
     logger.info("🧪 VALIDATOR DATA GENERATION")
     logger.info("=" * 40)
     logger.info(f"Total samples: {TOTAL_SAMPLES}")
     logger.info(f"SAT ratio: {SAT_RATIO}")
     logger.info(f"Seed: {SEED}")
+    logger.info(f"Vary problem size: {VARY_SIZE}")
     logger.info(f"Output: {OUTPUT_DIR}")
-    
-    # Generate data
-    generator = ValidatorDataGenerator(seed=SEED)
+
+    # Generate data with size variation enabled
+    generator = ValidatorDataGenerator(seed=SEED, vary_size=VARY_SIZE)
     samples = await generator.generate_dataset(TOTAL_SAMPLES, SAT_RATIO)
     
     if not samples:
