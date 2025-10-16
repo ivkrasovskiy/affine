@@ -632,7 +632,7 @@ async def main():
             data_collator=data_collator,
             callbacks=[
                 MLflowCallback(),
-                ValidatorMetricsCallback(test_data, tokenizer)
+                ValidatorMetricsCallback(test_data, tokenizer, eval_every=eval_steps)
             ]
         )
         
