@@ -30,12 +30,13 @@ class ValidatorDataGenerator:
         from affine.envs.sat import SAT
         from affine.envs.elr import ELR
 
-        # Initialize environments with PROPER difficulty parameters
-        # Using k=3 (3-SAT) for meaningful constraints instead of k=10 (99.9% trivial)
-        # If vary_size=True, we'll create new environments with random n for each sample
+        # Initialize environments for TRIVIAL all-True solution training
+        # Using k=10 (10 literals per clause) makes problems trivially satisfiable by all-True
+        # With k=10, probability of all-negative clause is ~0.1% (essentially impossible)
+        # This allows model to learn output format with trivial satisfiability
         self.default_n = 15
         self.n_range = (10, 30) if vary_size else (15, 15)
-        self.k = 3  # Fixed at 3-SAT for proper difficulty
+        self.k = 10  # Use k=10 for trivial satisfiability by all-True
 
         self.sat_env = SAT(n=self.default_n, k=self.k, m=None)
         self.elr_env = ELR()

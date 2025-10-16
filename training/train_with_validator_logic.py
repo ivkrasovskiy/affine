@@ -117,8 +117,8 @@ def setup_mlflow_experiment(experiment_name: str = "validator_training") -> str:
 
 class ValidatorMetricsCallback(TrainerCallback):
     """Real-time evaluation using validator logic"""
-    
-    def __init__(self, eval_samples: List[Dict], tokenizer, eval_every: int = EVAL_STEPS):
+
+    def __init__(self, eval_samples: List[Dict], tokenizer, eval_every: int):
         self.eval_samples = eval_samples
         self.tokenizer = tokenizer
         self.eval_every = eval_every
@@ -533,12 +533,34 @@ async def main():
 
         # Split dataset
         train_data, val_data, test_data = split_dataset(all_data)
-        
+
+        # Calculate adaptive eval steps (5-10% of training data)
+        # Target: evaluate every ~10% of dataset
+        effective_batch_size = BATCH_SIZE * GRAD_ACCUM
+        steps_per_epoch = len(train_data) // effective_batch_size
+        total_steps = int(steps_per_epoch * EPOCHS)
+
+        # Adaptive eval frequency: ~10 evaluations per full training
+        adaptive_eval_steps = max(10, total_steps // 10)
+
+        # Use environment variable if set, otherwise use adaptive
+        eval_steps = int(os.getenv("EVAL_STEPS", str(adaptive_eval_steps)))
+
+        logger.info(f"📊 Training steps calculation:")
+        logger.info(f"  Train samples: {len(train_data)}")
+        logger.info(f"  Effective batch size: {effective_batch_size}")
+        logger.info(f"  Steps per epoch: {steps_per_epoch}")
+        logger.info(f"  Total steps ({EPOCHS} epochs): {total_steps}")
+        logger.info(f"  Eval every: {eval_steps} steps (~{eval_steps/steps_per_epoch*100:.1f}% of epoch)")
+        logger.info(f"  Expected evaluations: ~{total_steps // eval_steps}")
+
         # Log dataset metrics
         mlflow.log_metric("dataset_total", len(all_data))
         mlflow.log_metric("dataset_train", len(train_data))
         mlflow.log_metric("dataset_val", len(val_data))
         mlflow.log_metric("dataset_test", len(test_data))
+        mlflow.log_metric("eval_steps", eval_steps)
+        mlflow.log_metric("total_steps", total_steps)
         
         # Save datasets
         with open(output_dir / "train_data.json", "w") as f:
@@ -554,7 +576,7 @@ async def main():
 
         # BASELINE EVALUATION on test set before training (SAT only)
         logger.info("📊 Evaluating BASELINE model on test set...")
-        callback = ValidatorMetricsCallback(test_data, tokenizer)
+        callback = ValidatorMetricsCallback(test_data, tokenizer, eval_every=eval_steps)
         baseline_sat, baseline_format, baseline_all_true = callback._evaluate_sat_with_validator(model)
 
         logger.info(f"BASELINE - Format: {baseline_format:.1%}, All-True: {baseline_all_true:.1%}, Solve: {baseline_sat:.1%}")
@@ -588,8 +610,8 @@ async def main():
             lr_scheduler_type="cosine",
             logging_steps=LOG_STEPS,
             eval_strategy="steps",
-            eval_steps=EVAL_STEPS,
-            save_steps=SAVE_STEPS,
+            eval_steps=eval_steps,  # Use adaptive eval_steps
+            save_steps=eval_steps,  # Save aligned with eval
             save_total_limit=2,
             bf16=USE_BF16,  # Use bf16 (model is in bfloat16)
             gradient_checkpointing=True,
@@ -625,15 +647,17 @@ async def main():
 
         # FINAL EVALUATION on test set after training
         logger.info("📊 Evaluating FINE-TUNED model on test set...")
-        final_sat, final_format = callback._evaluate_sat_with_validator(model)
+        final_sat, final_format, final_all_true = callback._evaluate_sat_with_validator(model)
 
-        logger.info(f"FINE-TUNED - Format: {final_format:.1%}, Solve: {final_sat:.1%}")
+        logger.info(f"FINE-TUNED - Format: {final_format:.1%}, All-True: {final_all_true:.1%}, Solve: {final_sat:.1%}")
         mlflow.log_metric("final_sat_accuracy", final_sat)
         mlflow.log_metric("final_format_accuracy", final_format)
+        mlflow.log_metric("final_all_true_accuracy", final_all_true)
 
         # Calculate improvements
         sat_improvement = final_sat - baseline_sat
         format_improvement = final_format - baseline_format
+        all_true_improvement = final_all_true - baseline_all_true
 
         logger.info("=" * 50)
         logger.info("📈 TRAINING RESULTS COMPARISON")
