@@ -5,7 +5,7 @@
 cd "$(dirname "$0")"
 source ../.venv/bin/activate
 
-export TOTAL_SAMPLES=2048
+export TOTAL_SAMPLES=1024
 export SAT_RATIO=1.0
 export SEED=42
 export VARY_SIZE=true

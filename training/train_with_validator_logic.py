@@ -31,8 +31,14 @@ from tqdm.auto import tqdm, trange
 # Our validator data generator
 from generate_validator_data import ValidatorDataGenerator
 
-# Setup logging
-logging.basicConfig(level=logging.INFO)
+# Setup logging - ensure it goes to stdout/stderr for nohup redirection
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler()  # Explicitly write to stderr (captured by nohup)
+    ]
+)
 logger = logging.getLogger(__name__)
 
 # ============== ENVIRONMENT CONFIGURATION ==============
@@ -180,7 +186,7 @@ class ValidatorMetricsCallback(TrainerCallback):
             mlflow.log_metric("validator_format_accuracy", format_accuracy, step=step)
             mlflow.log_metric("validator_all_true_accuracy", all_true_accuracy, step=step)
 
-            logger.info(f"Step {step}: Format {format_accuracy:.1%}, All-True {all_true_accuracy:.1%}, Solve {sat_accuracy:.1%}")
+            logger.info(f"[EVAL @ Step {step}] Format: {format_accuracy:.1%}, All-True: {all_true_accuracy:.1%}, SAT: {sat_accuracy:.1%}")
 
         except Exception as e:
             logger.error(f"Evaluation failed: {e}")
@@ -213,7 +219,8 @@ class ValidatorMetricsCallback(TrainerCallback):
             prompt = f"### Instruction:\n{sample['prompt']}\n\n### Response:\n"
 
             try:
-                inputs = self.tokenizer(prompt, return_tensors="pt", truncation=True, max_length=1024)
+                # IMPORTANT: Use same max_length as training (MAX_SEQ_LEN=4096)
+                inputs = self.tokenizer(prompt, return_tensors="pt", truncation=True, max_length=MAX_SEQ_LEN)
                 if torch.cuda.is_available():
                     inputs = {k: v.cuda() for k, v in inputs.items()}
 
@@ -231,9 +238,19 @@ class ValidatorMetricsCallback(TrainerCallback):
                     skip_special_tokens=True
                 ).strip()
 
-                # Debug: Log first few responses to see format
+                # Debug: Log first few responses with full context
                 if i < 3:
-                    logger.info(f"Sample {i} response: {response[:200]}")
+                    logger.info(f"\n{'='*60}")
+                    logger.info(f"VALIDATION SAMPLE {i}")
+                    logger.info(f"{'='*60}")
+                    logger.info(f"Original problem prompt (first 150 chars):")
+                    logger.info(f"  {sample['prompt'][:150]}...")
+                    logger.info(f"Expected completion (forced all-True):")
+                    logger.info(f"  {sample['completion']}")
+                    logger.info(f"Model output:")
+                    logger.info(f"  {response}")
+                    logger.info(f"Model output length: {len(response)} chars")
+                    logger.info(f"{'='*60}\n")
 
                 # Check format validity (can we parse ALL variables?)
                 import re
@@ -288,6 +305,11 @@ class MLflowCallback(TrainerCallback):
             for key, value in logs.items():
                 if isinstance(value, (int, float)):
                     mlflow.log_metric(key, value, step=state.global_step)
+
+            # Add training progress percentage
+            if state.max_steps > 0:
+                progress_pct = (state.global_step / state.max_steps) * 100
+                mlflow.log_metric("training_progress_pct", progress_pct, step=state.global_step)
 
 # ============== TRAINING FUNCTIONS ==============
 
