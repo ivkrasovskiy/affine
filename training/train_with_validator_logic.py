@@ -263,11 +263,18 @@ class ValidatorMetricsCallback(TrainerCallback):
                 parsed_vars = {int(v): val.lower() in ("true", "1") for v, val in matches}
                 n_vars_expected = sample['n_vars']
 
-                # STRICT: Require 100% of variables to be present (not just 80%)
-                has_valid_format = len(matches) == n_vars_expected
+                # Check if we have AT LEAST all required variables (x1 through x15)
+                # Model may generate extra variables (x16, x17...) due to no stop token
+                required_vars = set(range(1, n_vars_expected + 1))
+                found_vars = set(parsed_vars.keys())
+                has_all_required = required_vars.issubset(found_vars)
 
-                # Additional check: Are all values True? (since that's what we're training for)
-                all_true = all(parsed_vars.values()) if parsed_vars else False
+                # Format is valid if all required variables are present
+                has_valid_format = has_all_required and len(found_vars) >= n_vars_expected
+
+                # Check if the REQUIRED variables (x1-x15) are all True
+                required_values = [parsed_vars.get(i, False) for i in required_vars]
+                all_true = all(required_values) if required_values else False
 
                 if has_valid_format:
                     valid_format += 1
@@ -399,9 +406,18 @@ def format_instruction(sample: Dict[str, str]) -> Dict[str, str]:
     }
 
 def create_dataset(data: List[Dict[str, str]], tokenizer, max_seq_length: int = MAX_SEQ_LEN):
-    """Create tokenized dataset with assistant-only loss masking"""
-    
-    formatted_data = [format_instruction(sample) for sample in data]
+    """Create tokenized dataset with assistant-only loss masking
+
+    Adds EOS token after completion to teach model when to stop generating.
+    """
+
+    # Add EOS token to completions to teach model when to stop
+    formatted_data = []
+    for sample in data:
+        formatted = format_instruction(sample)
+        # Add EOS token to target_text so model learns to stop after completion
+        formatted["target_text"] = formatted["target_text"] + tokenizer.eos_token
+        formatted_data.append(formatted)
     
     def tokenize_function(examples):
         # Tokenize full text
