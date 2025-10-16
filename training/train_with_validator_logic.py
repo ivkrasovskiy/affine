@@ -186,7 +186,9 @@ class ValidatorMetricsCallback(TrainerCallback):
             mlflow.log_metric("validator_format_accuracy", format_accuracy, step=step)
             mlflow.log_metric("validator_all_true_accuracy", all_true_accuracy, step=step)
 
-            logger.info(f"[EVAL @ Step {step}] Format: {format_accuracy:.1%}, All-True: {all_true_accuracy:.1%}, SAT: {sat_accuracy:.1%}")
+            print(f"[EVAL @ Step {step}] Format: {format_accuracy:.1%}, All-True: {all_true_accuracy:.1%}, SAT: {sat_accuracy:.1%}")
+            import sys
+            sys.stdout.flush()
 
         except Exception as e:
             logger.error(f"Evaluation failed: {e}")
