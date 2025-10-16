@@ -454,7 +454,8 @@ def force_all_true_solutions(data: List[Dict]) -> List[Dict]:
                 sample["completion"] = all_true_completion
 
                 # Update validator_solution to match (all True)
-                sample["validator_solution"] = {i: True for i in range(1, n_vars + 1)}
+                # IMPORTANT: Use string keys to match original data format from JSON
+                sample["validator_solution"] = {str(i): True for i in range(1, n_vars + 1)}
 
         modified_data.append(sample)
 
