@@ -37,7 +37,7 @@ def load_dataset(data_path: str) -> List[Dict]:
     return data
 
 
-def load_model_and_tokenizer(model_path: str, base_model: str = "Qwen/Qwen2.5-3B-Instruct"):
+def load_model_and_tokenizer(model_path: str, base_model: str = "Marco0/Affine-QQ"):
     """Load the trained model and tokenizer"""
     logger.info(f"Loading base model: {base_model}")
 
@@ -115,7 +115,10 @@ def check_dataset_solvability(sample: Dict) -> bool:
 def generate_response(model, tokenizer, prompt: str) -> str:
     """Generate model response for a given prompt"""
     try:
-        inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=MAX_SEQ_LEN)
+        # IMPORTANT: Use same prompt format as training
+        formatted_prompt = f"### Instruction:\n{prompt}\n\n### Response:\n"
+
+        inputs = tokenizer(formatted_prompt, return_tensors="pt", truncation=True, max_length=MAX_SEQ_LEN)
         if torch.cuda.is_available():
             inputs = {k: v.cuda() for k, v in inputs.items()}
 
@@ -272,8 +275,8 @@ def main():
 
     # Configuration from environment variables
     DATA_PATH = os.getenv("DATA_PATH", "../data/validator_dataset.json")
-    MODEL_PATH = os.getenv("MODEL_PATH", "./experiments/validator_training")
-    BASE_MODEL = os.getenv("BASE_MODEL", "Qwen/Qwen2.5-3B-Instruct")
+    MODEL_PATH = os.getenv("MODEL_PATH", "./experiments/validator_training/model")
+    BASE_MODEL = os.getenv("BASE_MODEL", "Marco0/Affine-QQ")
     OUTPUT_PATH = os.getenv("OUTPUT_PATH", "./evaluation_results.json")
 
     # Split ratios (should match training script)
