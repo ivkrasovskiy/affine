@@ -239,18 +239,21 @@ class ValidatorMetricsCallback(TrainerCallback):
                 ).strip()
 
                 # Debug: Log first few responses with full context
+                # Using print() because logger.info() doesn't show in nohup logs
                 if i < 3:
-                    logger.info(f"\n{'='*60}")
-                    logger.info(f"VALIDATION SAMPLE {i}")
-                    logger.info(f"{'='*60}")
-                    logger.info(f"Original problem prompt (first 150 chars):")
-                    logger.info(f"  {sample['prompt'][:150]}...")
-                    logger.info(f"Expected completion (forced all-True):")
-                    logger.info(f"  {sample['completion']}")
-                    logger.info(f"Model output:")
-                    logger.info(f"  {response}")
-                    logger.info(f"Model output length: {len(response)} chars")
-                    logger.info(f"{'='*60}\n")
+                    print(f"\n{'='*60}")
+                    print(f"VALIDATION SAMPLE {i}")
+                    print(f"{'='*60}")
+                    print(f"Original problem prompt (first 150 chars):")
+                    print(f"  {sample['prompt'][:150]}...")
+                    print(f"Expected completion (forced all-True):")
+                    print(f"  {sample['completion']}")
+                    print(f"Model output:")
+                    print(f"  {response}")
+                    print(f"Model output length: {len(response)} chars")
+                    print(f"{'='*60}\n")
+                    import sys
+                    sys.stdout.flush()
 
                 # Check format validity (can we parse ALL variables?)
                 import re
