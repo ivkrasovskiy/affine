@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 class ValidatorDataGenerator:
     """Generate training data using exact validator logic"""
     
-    def __init__(self, seed: int = 42, vary_size: bool = True):
+    def __init__(self, seed: int = 42, vary_size: bool = False):
         self.seed = seed
         self.vary_size = vary_size
         random.seed(seed)
@@ -243,7 +243,7 @@ async def main():
     SAT_RATIO = float(os.getenv("SAT_RATIO", "0.75"))
     SEED = int(os.getenv("SEED", "42"))
     OUTPUT_DIR = os.getenv("OUTPUT_DIR", "./data")
-    VARY_SIZE = os.getenv("VARY_SIZE", "true").lower() in ("true", "1", "yes")
+    VARY_SIZE = False
 
     logger.info("🧪 VALIDATOR DATA GENERATION")
     logger.info("=" * 40)

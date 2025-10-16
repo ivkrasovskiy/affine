@@ -31,4 +31,4 @@ psutil>=5.9.0
 
 # Optional modern PEFT methods
 # For AdaLoRA, DoRA support
-adapters>=0.2.0
+# adapters

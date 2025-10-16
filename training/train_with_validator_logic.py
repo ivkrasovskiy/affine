@@ -43,22 +43,22 @@ MODEL_NAME = os.getenv("MODEL_NAME", "Marco0/Affine-QQ")  # Use production model
 OUT_DIR = os.getenv("OUT_DIR", "./experiments/validator_training")
 MAX_SEQ_LEN = int(os.getenv("MAX_SEQ_LEN", "4096"))  # Increased for full SAT prompts (~3200 tokens)
 
-# Training
-BATCH_SIZE = int(os.getenv("BATCH_SIZE", "1"))
-GRAD_ACCUM = int(os.getenv("GRAD_ACCUM", "8"))
+# Training - Max LoRA Capacity Configuration (16K dataset)
+BATCH_SIZE = int(os.getenv("BATCH_SIZE", "2"))  # Reduced to 2 for memory stability
+GRAD_ACCUM = int(os.getenv("GRAD_ACCUM", "8"))  # Adjusted to keep effective batch 16
 LEARNING_RATE = float(os.getenv("LEARNING_RATE", "2e-4"))
-EPOCHS = float(os.getenv("EPOCHS", "2.0"))
+EPOCHS = float(os.getenv("EPOCHS", "3.0"))  # Increased for 16K dataset
 WARMUP_RATIO = float(os.getenv("WARMUP_RATIO", "0.1"))
 
-# LoRA
-LORA_R = int(os.getenv("LORA_R", "32"))
-LORA_ALPHA = int(os.getenv("LORA_ALPHA", "16"))
-LORA_DROPOUT = float(os.getenv("LORA_DROPOUT", "0.1"))
+# LoRA - Max Capacity Configuration (RTX 5090 32GB)
+LORA_R = int(os.getenv("LORA_R", "128"))        # 4x increase from 32
+LORA_ALPHA = int(os.getenv("LORA_ALPHA", "256"))  # 2x LORA_R
+LORA_DROPOUT = float(os.getenv("LORA_DROPOUT", "0.05"))
 
-# Evaluation
-EVAL_STEPS = int(os.getenv("EVAL_STEPS", "50"))
+# Evaluation - Optimized for 16K dataset (10% overhead)
+EVAL_STEPS = int(os.getenv("EVAL_STEPS", "200"))  # Eval every 200 steps (~10% overhead)
 LOG_STEPS = int(os.getenv("LOG_STEPS", "10"))
-SAVE_STEPS = int(os.getenv("SAVE_STEPS", "100"))
+SAVE_STEPS = int(os.getenv("SAVE_STEPS", "200"))  # Save aligned with eval
 EVAL_SAMPLES = int(os.getenv("EVAL_SAMPLES", "20"))
 
 # Generation (for evaluation)
@@ -139,13 +139,14 @@ class ValidatorMetricsCallback(TrainerCallback):
 
         try:
             # Evaluate using validator logic (SAT only)
-            sat_accuracy, format_accuracy = self._evaluate_sat_with_validator(model)
+            sat_accuracy, format_accuracy, all_true_accuracy = self._evaluate_sat_with_validator(model)
 
             # Log to MLflow with step 0
             mlflow.log_metric("validator_sat_accuracy", sat_accuracy, step=0)
             mlflow.log_metric("validator_format_accuracy", format_accuracy, step=0)
+            mlflow.log_metric("validator_all_true_accuracy", all_true_accuracy, step=0)
 
-            logger.info(f"📊 Baseline - Format: {format_accuracy:.1%}, Solve: {sat_accuracy:.1%}")
+            logger.info(f"📊 Baseline - Format: {format_accuracy:.1%}, All-True: {all_true_accuracy:.1%}, Solve: {sat_accuracy:.1%}")
 
         except Exception as e:
             logger.error(f"Baseline evaluation failed: {e}")
@@ -163,37 +164,46 @@ class ValidatorMetricsCallback(TrainerCallback):
 
         logger.info(f"🔍 Validator evaluation at step {state.global_step}")
 
+        # Clear CUDA cache before evaluation to free memory
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
         model.eval()
 
         try:
             # Evaluate using validator logic (SAT only)
-            sat_accuracy, format_accuracy = self._evaluate_sat_with_validator(model)
+            sat_accuracy, format_accuracy, all_true_accuracy = self._evaluate_sat_with_validator(model)
 
             # Log to MLflow
             step = int(state.global_step)
             mlflow.log_metric("validator_sat_accuracy", sat_accuracy, step=step)
             mlflow.log_metric("validator_format_accuracy", format_accuracy, step=step)
+            mlflow.log_metric("validator_all_true_accuracy", all_true_accuracy, step=step)
 
-            logger.info(f"Step {step}: Format {format_accuracy:.1%}, Solve {sat_accuracy:.1%}")
+            logger.info(f"Step {step}: Format {format_accuracy:.1%}, All-True {all_true_accuracy:.1%}, Solve {sat_accuracy:.1%}")
 
         except Exception as e:
             logger.error(f"Evaluation failed: {e}")
         finally:
+            # Clear cache after evaluation before resuming training
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
             model.train()
 
         return control
     
-    def _evaluate_sat_with_validator(self, model) -> tuple[float, float]:
+    def _evaluate_sat_with_validator(self, model) -> tuple[float, float, float]:
         """Evaluate SAT using exact validator validation logic
 
         Returns:
-            (solve_accuracy, format_accuracy): both as floats 0.0-1.0
+            (solve_accuracy, format_accuracy, all_true_accuracy): all as floats 0.0-1.0
         """
         if not self.sat_samples:
-            return 0.0, 0.0
+            return 0.0, 0.0, 0.0
 
         correct = 0
         valid_format = 0
+        all_true_count = 0
         total = min(EVAL_SAMPLES // 2, len(self.sat_samples))
 
         amp_ctx = torch.autocast("cuda", dtype=torch.bfloat16) if USE_BF16 and torch.cuda.is_available() else nullcontext()
@@ -225,19 +235,32 @@ class ValidatorMetricsCallback(TrainerCallback):
                 if i < 3:
                     logger.info(f"Sample {i} response: {response[:200]}")
 
-                # Check format validity (can we parse variables?)
+                # Check format validity (can we parse ALL variables?)
                 import re
                 matches = re.findall(r"x(\d+)=(True|False|1|0)", response)
+                parsed_vars = {int(v): val.lower() in ("true", "1") for v, val in matches}
                 n_vars_expected = sample['n_vars']
-                has_valid_format = len(matches) >= n_vars_expected * 0.8  # At least 80% of vars
+
+                # STRICT: Require 100% of variables to be present (not just 80%)
+                has_valid_format = len(matches) == n_vars_expected
+
+                # Additional check: Are all values True? (since that's what we're training for)
+                all_true = all(parsed_vars.values()) if parsed_vars else False
 
                 if has_valid_format:
                     valid_format += 1
 
+                if all_true and has_valid_format:
+                    all_true_count += 1
+
+                # Debug: Show format compliance
+                if i < 3:
+                    logger.info(f"  Format check: {len(matches)}/{n_vars_expected} vars parsed, valid_format={has_valid_format}, all_true={all_true}")
+
                 # Use validator's exact validation logic
                 is_correct = self.generator.validate_sat_response(sample, response, debug=(i < 3))
                 if i < 3:
-                    logger.info(f"Sample {i}: format={'✓' if has_valid_format else '✗'}, correct={'✓' if is_correct else '✗'}")
+                    logger.info(f"Sample {i}: format={'✓' if has_valid_format else '✗'}, all_true={'✓' if all_true else '✗'}, correct={'✓' if is_correct else '✗'}")
 
                 if is_correct:
                     correct += 1
@@ -252,7 +275,8 @@ class ValidatorMetricsCallback(TrainerCallback):
 
         solve_accuracy = correct / max(total, 1)
         format_accuracy = valid_format / max(total, 1)
-        return solve_accuracy, format_accuracy
+        all_true_accuracy = all_true_count / max(total, 1)
+        return solve_accuracy, format_accuracy, all_true_accuracy
     
 # ============== MLFLOW LOGGING CALLBACK ==============
 
@@ -305,14 +329,20 @@ def load_model_simple(model_name: str = MODEL_NAME):
     # Prepare model for k-bit training
     model = prepare_model_for_kbit_training(model)
 
-    # Add LoRA adapters
+    # Add LoRA adapters - Max Capacity Configuration
+    # Includes lm_head (helps with True/False output), removed embed_tokens to save memory
     lora_config = LoraConfig(
         r=LORA_R,
         lora_alpha=LORA_ALPHA,
-        target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+        target_modules=[
+            "q_proj", "k_proj", "v_proj", "o_proj",     # Attention layers
+            "gate_proj", "up_proj", "down_proj",         # MLP layers
+            "lm_head"                                     # NEW: helps with True/False output
+        ],
         lora_dropout=LORA_DROPOUT,
         bias="none",
-        task_type=TaskType.CAUSAL_LM
+        task_type=TaskType.CAUSAL_LM,
+        modules_to_save=None  # Keep None, lm_head will be LoRA-adapted
     )
 
     model = get_peft_model(model, lora_config)
@@ -396,36 +426,71 @@ def create_dataset(data: List[Dict[str, str]], tokenizer, max_seq_length: int = 
     
     return tokenized_dataset
 
+def force_all_true_solutions(data: List[Dict]) -> List[Dict]:
+    """Force all SAT solutions to have all variables set to True
+
+    This modifies the completion and validator_solution to set all variables to True,
+    helping the model learn the output format first before tackling complex logic.
+
+    Args:
+        data: List of dataset samples
+
+    Returns:
+        Modified dataset with all-True solutions for SAT problems
+    """
+    modified_data = []
+
+    for sample in data:
+        if sample.get("environment") == "SAT":
+            # Get number of variables from the sample
+            n_vars = sample.get("n_vars")
+
+            if n_vars:
+                # Force all variables to True in completion
+                all_true_completion = ", ".join([f"x{k}=True" for k in range(1, n_vars + 1)])
+
+                # Update the sample
+                sample = sample.copy()  # Don't modify original
+                sample["completion"] = all_true_completion
+
+                # Update validator_solution to match (all True)
+                sample["validator_solution"] = {i: True for i in range(1, n_vars + 1)}
+
+        modified_data.append(sample)
+
+    logger.info(f"✓ Forced all SAT solutions to all-True format")
+    return modified_data
+
 def split_dataset(data: List[Dict], train_ratio: float = 0.7, val_ratio: float = 0.15):
     """Split dataset with stratification"""
     from sklearn.model_selection import train_test_split
-    
+
     sat_data = [item for item in data if item.get("environment") == "SAT"]
     elr_data = [item for item in data if item.get("environment") == "ELR"]
-    
+
     def split_env_data(env_data, train_r, val_r):
         if len(env_data) < 3:
             return env_data, [], []
-        
+
         train, temp = train_test_split(env_data, train_size=train_r, random_state=SEED)
-        
+
         if len(temp) < 2:
             return train, temp, []
-        
+
         val_size = val_r / (val_r + (1 - train_r - val_r))
         val, test = train_test_split(temp, train_size=val_size, random_state=SEED)
-        
+
         return train, val, test
-    
+
     sat_train, sat_val, sat_test = split_env_data(sat_data, train_ratio, val_ratio)
     elr_train, elr_val, elr_test = split_env_data(elr_data, train_ratio, val_ratio)
-    
+
     train_data = sat_train + elr_train
-    val_data = sat_val + elr_val  
+    val_data = sat_val + elr_val
     test_data = sat_test + elr_test
-    
+
     logger.info(f"Dataset split: Train={len(train_data)}, Val={len(val_data)}, Test={len(test_data)}")
-    
+
     return train_data, val_data, test_data
 
 # ============== MAIN TRAINING FUNCTION ==============
@@ -460,7 +525,11 @@ async def main():
 
         if len(all_data) < 10:
             raise RuntimeError("Insufficient training data in dataset")
-        
+
+        # Force all SAT solutions to all-True (simplifies learning task)
+        logger.info("🔄 Forcing all SAT solutions to all-True format...")
+        all_data = force_all_true_solutions(all_data)
+
         # Split dataset
         train_data, val_data, test_data = split_dataset(all_data)
         
@@ -485,11 +554,12 @@ async def main():
         # BASELINE EVALUATION on test set before training (SAT only)
         logger.info("📊 Evaluating BASELINE model on test set...")
         callback = ValidatorMetricsCallback(test_data, tokenizer)
-        baseline_sat, baseline_format = callback._evaluate_sat_with_validator(model)
+        baseline_sat, baseline_format, baseline_all_true = callback._evaluate_sat_with_validator(model)
 
-        logger.info(f"BASELINE - Format: {baseline_format:.1%}, Solve: {baseline_sat:.1%}")
+        logger.info(f"BASELINE - Format: {baseline_format:.1%}, All-True: {baseline_all_true:.1%}, Solve: {baseline_sat:.1%}")
         mlflow.log_metric("baseline_sat_accuracy", baseline_sat)
         mlflow.log_metric("baseline_format_accuracy", baseline_format)
+        mlflow.log_metric("baseline_all_true_accuracy", baseline_all_true)
 
         # Create datasets
         logger.info("🔨 Creating tokenized datasets...")
@@ -509,7 +579,7 @@ async def main():
             output_dir=str(output_dir / "model"),
             overwrite_output_dir=True,
             per_device_train_batch_size=BATCH_SIZE,
-            per_device_eval_batch_size=BATCH_SIZE,
+            per_device_eval_batch_size=1,  # Reduced for memory efficiency during eval
             gradient_accumulation_steps=GRAD_ACCUM,
             num_train_epochs=EPOCHS,
             learning_rate=LEARNING_RATE,
